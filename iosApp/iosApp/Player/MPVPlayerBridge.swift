@@ -683,6 +683,7 @@ final class MPVPlayerViewController: UIViewController {
         setSetupOption("gpu-context", "moltenvk")
         setSetupOption("hwdec", "videotoolbox")
         setSetupOption("ao", Self.defaultAudioOutput)
+        setSetupOption("audio-exclusive", "yes")
         setSetupOption("audio-channels", "auto")
         setSetupOption("audio-fallback-to-null", "yes")
         setSetupOption("volume-max", "200")
@@ -750,9 +751,16 @@ final class MPVPlayerViewController: UIViewController {
                                                name: UIApplication.didBecomeActiveNotification, object: nil)
     }
 
+    private var hwdecBeforeBackground: String?
+
     @objc private func enterBackground() {
         metalLayer.releasePendingDrawable()
         guard mpv != nil else { return }
+        let coreGeneration = mpvGeneration
+        mpvQueue.async { [weak self] in
+            guard let self, self.mpvGeneration == coreGeneration, self.mpv != nil else { return }
+            self.hwdecBeforeBackground = self.getString("hwdec-current")
+        }
         if pictureInPictureController?.enteredBackground() == true { return }
         pausePlayback()
         setStringProperty("vid", "no")
@@ -769,6 +777,27 @@ final class MPVPlayerViewController: UIViewController {
 
     @objc private func didBecomeActive() {
         resumeRenderingAfterDeviceLossIfPossible(reason: "did-become-active")
+        restoreHardwareDecodingIfLost()
+    }
+
+    private func restoreHardwareDecodingIfLost() {
+        guard mpv != nil else { return }
+        let configured = lastVideoOutputSettings?.hardwareDecoder ?? "videotoolbox"
+        guard configured != "no" else { return }
+        let coreGeneration = mpvGeneration
+        mpvQueue.async { [weak self] in
+            guard let self, self.mpvGeneration == coreGeneration, self.mpv != nil else { return }
+            let before = self.hwdecBeforeBackground ?? ""
+            self.hwdecBeforeBackground = nil
+            let current = self.getString("hwdec-current") ?? ""
+            guard !before.isEmpty, before != "no", current.isEmpty || current == "no" else { return }
+            InAppLogBridge.shared.warn(
+                tag: "MPV/iOS",
+                message: "Hardware decoding lost in background (was \(before)); reinitialising hwdec=\(configured)"
+            )
+            self.setStringProperty("hwdec", "no")
+            self.setStringProperty("hwdec", configured)
+        }
     }
 
     private func resumeRenderingAfterDeviceLossIfPossible(reason: String) {
@@ -1537,22 +1566,54 @@ final class MPVPlayerViewController: UIViewController {
         teardownMpvCore()
     }
 
+    private static let audioSessionQueue = DispatchQueue(label: "nuvio.audio-session", qos: .userInitiated)
+    private static let slowAudioSessionCallMs = 500.0
+
     private func activateAudioSessionForPlayback() {
-        do {
+        Self.audioSessionQueue.async {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .moviePlayback)
-            try session.setActive(true)
-        } catch {
-            print("[NowPlaying] Failed to activate audio session: \(error)")
+            let needsCategory = session.category != .playback ||
+                session.mode != .moviePlayback ||
+                session.categoryOptions.contains(.mixWithOthers)
+            do {
+                if needsCategory {
+                    try Self.timedAudioSessionCall("setCategory(.playback, .moviePlayback)") {
+                        try session.setCategory(.playback, mode: .moviePlayback)
+                    }
+                }
+                try Self.timedAudioSessionCall("setActive(true)") {
+                    try session.setActive(true)
+                }
+            } catch {
+                InAppLogBridge.shared.warn(tag: "Audio/iOS", message: "Failed to activate audio session: \(error)")
+            }
         }
     }
 
     private func deactivateAudioSession() {
-        do {
-            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        } catch {
-            print("[NowPlaying] Failed to deactivate audio session: \(error)")
+        Self.audioSessionQueue.async {
+            do {
+                try Self.timedAudioSessionCall("setActive(false)") {
+                    try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                }
+            } catch {
+                InAppLogBridge.shared.warn(tag: "Audio/iOS", message: "Failed to deactivate audio session: \(error)")
+            }
         }
+    }
+
+    private static func timedAudioSessionCall(_ name: String, _ call: () throws -> Void) throws {
+        let start = CACurrentMediaTime()
+        defer {
+            let elapsedMs = (CACurrentMediaTime() - start) * 1000
+            let message = "audioSession.\(name) took \(Int(elapsedMs))ms"
+            if elapsedMs >= slowAudioSessionCallMs {
+                InAppLogBridge.shared.warn(tag: "Audio/iOS", message: message)
+            } else {
+                InAppLogBridge.shared.info(tag: "Audio/iOS", message: message)
+            }
+        }
+        try call()
     }
 
     // MARK: - Media Info
@@ -1819,6 +1880,7 @@ final class MPVPlayerViewController: UIViewController {
     }
 
     private func syncNowPlayingPlaybackState(isPlaying: Bool) {
+        let start = CACurrentMediaTime()
         pictureInPictureController?.updatePlaybackState()
         nowPlayingController.syncPlayback(
             positionMs: positionMs,
@@ -1826,6 +1888,13 @@ final class MPVPlayerViewController: UIViewController {
             isPlaying: isPlaying,
             playbackSpeed: currentSpeed
         )
+        let elapsedMs = (CACurrentMediaTime() - start) * 1000
+        if elapsedMs >= 100 {
+            InAppLogBridge.shared.warn(
+                tag: "Audio/iOS",
+                message: "Now Playing sync (isPlaying=\(isPlaying)) took \(Int(elapsedMs))ms on main thread"
+            )
+        }
     }
 
     func updateState() {
