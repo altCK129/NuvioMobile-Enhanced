@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "0.6.4",
+          "buildVersion": "147",
+          "date": "2026-10-17T14:11:04Z",
+          "localizedDescription": "- 67d3fdc7 Update AppUpdaterRepository.kt @chrisk325  \n- [feat anime id mapper for trakt , mdblist and wetrackr (#205)](https://github.com/chrisk325/NuvioMobile-Enhanced/pull/205) @chrisk325  \n- [feat(i18n): add Brazilian Portuguese (pt-BR) localization for watch party, servers, mdblist and autosync (#202)](https://github.com/chrisk325/NuvioMobile-Enhanced/pull/202) @mikhaelvm  \n- [Revision and completion of pt-BR translation (#201)](https://github.com/chrisk325/NuvioMobile-Enhanced/pull/201) @mikhaelvm  \n- [fixes related to watchparty (#200)](https://github.com/chrisk325/NuvioMobile-Enhanced/pull/200) @chrisk325  \n",
+          "downloadURL": "https://github.com/chrisk325/NuvioMobile-Enhanced/releases/download/0.6.4-beta/nuvio-0.6.4-enhanced-release.ipa",
+          "size": 72749271,
+          "sha256": "78ab661f06275b113fb3e2a9fde032fd921d89192bf3252e1a646036589756c0",
+          "minOSVersion": "16.1"
+        },
+        {
           "version": "0.6.1",
           "buildVersion": "144",
           "date": "2026-10-16T16:15:30Z",
