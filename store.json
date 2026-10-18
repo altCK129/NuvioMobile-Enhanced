@@ -20,6 +20,16 @@
       "category": "entertainment",
       "versions": [
         {
+          "version": "0.6.5",
+          "buildVersion": "148",
+          "date": "2026-10-18T13:31:40Z",
+          "localizedDescription": "- [more Enhanced strings into pt-BR (Brazilian Portuguese) (#209)](https://github.com/chrisk325/NuvioMobile-Enhanced/pull/209) @mikhaelvm  \n- [feat Liquid Glass integration in the entire android UI including legacy player  with a toggle to disable it all (#210)](https://github.com/chrisk325/NuvioMobile-Enhanced/pull/210) @chrisk325  \n- eaac8d96 feat(player): tie the PiP button to the mini player setting on both platforms @luqmanfadlli  \n- ec7b3162 feat(ios): bring mini player to iOS @luqmanfadlli  \n- 6c6e24d4 fix(ios): keep iPad Liquid Glass tab bar setting device-local @luqmanfadlli  \n- fec3566b feat(ios): Liquid Glass tab bar option on iPadOS 26+ @luqmanfadlli  \n",
+          "downloadURL": "https://github.com/chrisk325/NuvioMobile-Enhanced/releases/download/0.6.5-beta/nuvio-0.6.5-enhanced-release.ipa",
+          "size": 72824594,
+          "sha256": "b01ac60dcdc02d027eab2c88c13e794975b570eee7cd66f46661391d9c68ea42",
+          "minOSVersion": "16.1"
+        },
+        {
           "version": "0.6.4",
           "buildVersion": "147",
           "date": "2026-10-17T14:11:04Z",
