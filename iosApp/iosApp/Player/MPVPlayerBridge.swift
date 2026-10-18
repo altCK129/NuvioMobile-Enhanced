@@ -11,8 +11,6 @@ final class MPVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
 
     private var playerVC: MPVPlayerViewController?
     private var experimentalSinglePrimaryPictureInPictureEnabled = false
-    // Kotlin can set these before the view controller exists, so they are held here and replayed
-    // in ensurePlayerViewController().
     private var keyboardShortcutsEnabled = true
     private var keyboardShortcutHandler: ((String) -> Void)?
 
@@ -65,9 +63,8 @@ final class MPVPlayerBridgeImpl: NSObject, NuvioPlayerBridge {
     func retry() { playerVC?.retryPlayback() }
     func isPictureInPictureSupported() -> Bool { playerVC?.isPictureInPictureSupported() ?? false }
     func startPictureInPicture() { playerVC?.startPictureInPicture() }
+    func setVideoZoom(scale: Double) { playerVC?.setVideoZoom(scale) }
     func setExperimentalSinglePrimaryPictureInPictureEnabled(enabled: Bool) {
-        // The experimental Metal-capture PiP renderer was replaced by upstream's VideoToolbox
-        // frame handoff; the toggle is kept only so the Kotlin bridge contract stays intact.
         experimentalSinglePrimaryPictureInPictureEnabled = enabled
     }
     func updateNowPlayingMetadata(
@@ -300,6 +297,15 @@ final class MPVPlayerViewController: UIViewController {
     var mpv: OpaquePointer?
     private var cachedNowPlayingMetadata: CachedNowPlayingMetadata?
     private lazy var nowPlayingController = PlayerNowPlayingController(owner: self)
+    private lazy var audioSessionController: PlayerAudioSessionController = {
+        let controller = PlayerAudioSessionController()
+        controller.onConfigurationChanged = { [weak self] in
+            guard let self, self.mpv != nil else { return }
+            self.publishCachedNowPlayingInfoIfNeeded()
+            self.syncNowPlayingPlaybackState(isPlaying: self.isPlayerPlaying)
+        }
+        return controller
+    }()
     private let eventQueue = DispatchQueue(label: "mpv-events", qos: .userInitiated)
     private let mpvQueue: DispatchQueue = {
         let queue = DispatchQueue(label: "mpv-properties", qos: .userInitiated)
@@ -393,6 +399,7 @@ final class MPVPlayerViewController: UIViewController {
     private var lastSubtitleStyle: SubtitleStyleSettings?
     private var lastAudioOutput: String?
     private var lastResizeMode: Int?
+    private var lastVideoZoom: Double?
     private var lastSubtitleDelayMs: Int?
     private var lastVolume: Float?
     private var lastMuted: Bool?
@@ -428,12 +435,8 @@ final class MPVPlayerViewController: UIViewController {
     private let logCoalesceLock = NSLock()
     private var throttledLogEntries: [String: ThrottledLogEntry] = [:]
 
-
-    // Cached track lists
     var audioTracks: [TrackInfo] = []
     var subtitleTracks: [TrackInfo] = []
-
-    // State (polled from Kotlin every 250ms)
     var isPlayerLoading: Bool = true
     var isPlayerPlaying: Bool = false
     var isPlayerEnded: Bool = false
@@ -517,6 +520,10 @@ final class MPVPlayerViewController: UIViewController {
         }
         setupNotifications()
         refreshImmersiveSystemUI()
+    }
+
+    func setPictureInPicturePlaceholderVisible(_ visible: Bool) {
+        SystemUI.shared.setPictureInPicturePlaceholder(self, visible: visible)
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -660,7 +667,6 @@ final class MPVPlayerViewController: UIViewController {
         CATransaction.commit()
     }
 
-    /// Subtitle font selection for non-Latin scripts. See MPVSubtitleFontResolver.
     private lazy var subtitleFonts = MPVSubtitleFontController(player: self)
 
     // MARK: - MPV Setup
@@ -709,7 +715,6 @@ final class MPVPlayerViewController: UIViewController {
 
         checkError(mpv_initialize(mpv))
 
-        // Observe properties
         mpv_observe_property(mpv, 0, "pause", MPV_FORMAT_FLAG)
         mpv_observe_property(mpv, 0, "paused-for-cache", MPV_FORMAT_FLAG)
         mpv_observe_property(mpv, 0, "core-idle", MPV_FORMAT_FLAG)
@@ -762,8 +767,16 @@ final class MPVPlayerViewController: UIViewController {
             self.hwdecBeforeBackground = self.getString("hwdec-current")
         }
         if pictureInPictureController?.enteredBackground() == true { return }
+        pauseBackgroundPlayback()
+    }
+
+    func pauseBackgroundPlayback() {
         pausePlayback()
         setStringProperty("vid", "no")
+    }
+
+    func restoreBackgroundVideo() {
+        setStringProperty("vid", "auto")
     }
 
     @objc private func enterForeground() {
@@ -771,7 +784,7 @@ final class MPVPlayerViewController: UIViewController {
         guard mpv != nil else { return }
         let wasInPictureInPicture = pictureInPictureController?.enteredForeground() == true
         if wasInPictureInPicture { return }
-        setStringProperty("vid", "auto")
+        restoreBackgroundVideo()
         playPlayback()
     }
 
@@ -813,13 +826,27 @@ final class MPVPlayerViewController: UIViewController {
         pictureInPictureController?.isSupported ?? false
     }
 
-    /// The player's PiP button. Automatic PiP on backgrounding is handled by the controller.
     func startPictureInPicture() {
         pictureInPictureController?.start()
     }
 
     func isPictureInPictureActive() -> Bool {
         pictureInPictureController?.isActive ?? false
+    }
+
+    func setParkedInPictureInPicture(_ parked: Bool) {
+        guard !isEmbeddedPreviewMode else { return }
+        publishImmersiveSystemUIVisibility(isVisible: !parked)
+        if parked {
+            resignFirstResponder()
+        } else {
+            becomeFirstResponder()
+        }
+    }
+
+    func endPictureInPictureSession() {
+        pictureInPictureController?.invalidate()
+        pictureInPictureController = nil
     }
 
     // MARK: - Playback API
@@ -1230,6 +1257,7 @@ final class MPVPlayerViewController: UIViewController {
         }
         if let audioOutput = lastAudioOutput { setStringProperty("ao", audioOutput) }
         if let mode = lastResizeMode { setResize(mode) }
+        if let zoom = lastVideoZoom { setVideoZoom(zoom) }
         if let delay = lastSubtitleDelayMs { setSubtitleDelayMs(delay) }
         if let style = lastSubtitleStyle {
             applySubtitleStyle(
@@ -1351,8 +1379,6 @@ final class MPVPlayerViewController: UIViewController {
             return
         }
 
-        // Keep mpv's base volume at 100 and apply real software amplification through volume-gain.
-        // 2.0x equals about +6.02 dB.
         setDoubleProperty("volume", 100.0)
         setDoubleProperty("volume-gain", 20.0 * log10(clamped))
     }
@@ -1374,19 +1400,27 @@ final class MPVPlayerViewController: UIViewController {
         setFlag("mute", muted)
     }
 
+    func setVideoZoom(_ scale: Double) {
+        let clamped = min(max(scale, 0.25), 4.0)
+        lastVideoZoom = clamped
+        guard mpv != nil else { return }
+        setDoubleProperty("video-zoom", log2(clamped))
+    }
+
     func setResize(_ mode: Int) {
         lastResizeMode = mode
         guard mpv != nil else { return }
+        setStringProperty("video-unscaled", "no")
         switch mode {
-        case 1: // Fill
-            setStringProperty("panscan", "1.0")
-            setStringProperty("video-unscaled", "no")
-        case 2: // Zoom
-            setStringProperty("panscan", "1.0")
-            setStringProperty("video-unscaled", "no")
-        default: // Fit
+        case 1: // Fill: stretch to the screen without cropping (ignores the aspect ratio)
+            setStringProperty("keepaspect", "no")
             setStringProperty("panscan", "0.0")
-            setStringProperty("video-unscaled", "no")
+        case 2: // Zoom: enlarge with the aspect ratio kept until the black bars are gone
+            setStringProperty("keepaspect", "yes")
+            setStringProperty("panscan", "1.0")
+        default: // Fit
+            setStringProperty("keepaspect", "yes")
+            setStringProperty("panscan", "0.0")
         }
     }
 
@@ -1566,54 +1600,12 @@ final class MPVPlayerViewController: UIViewController {
         teardownMpvCore()
     }
 
-    private static let audioSessionQueue = DispatchQueue(label: "nuvio.audio-session", qos: .userInitiated)
-    private static let slowAudioSessionCallMs = 500.0
-
     private func activateAudioSessionForPlayback() {
-        Self.audioSessionQueue.async {
-            let session = AVAudioSession.sharedInstance()
-            let needsCategory = session.category != .playback ||
-                session.mode != .moviePlayback ||
-                session.categoryOptions.contains(.mixWithOthers)
-            do {
-                if needsCategory {
-                    try Self.timedAudioSessionCall("setCategory(.playback, .moviePlayback)") {
-                        try session.setCategory(.playback, mode: .moviePlayback)
-                    }
-                }
-                try Self.timedAudioSessionCall("setActive(true)") {
-                    try session.setActive(true)
-                }
-            } catch {
-                InAppLogBridge.shared.warn(tag: "Audio/iOS", message: "Failed to activate audio session: \(error)")
-            }
-        }
+        audioSessionController.activate()
     }
 
     private func deactivateAudioSession() {
-        Self.audioSessionQueue.async {
-            do {
-                try Self.timedAudioSessionCall("setActive(false)") {
-                    try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-                }
-            } catch {
-                InAppLogBridge.shared.warn(tag: "Audio/iOS", message: "Failed to deactivate audio session: \(error)")
-            }
-        }
-    }
-
-    private static func timedAudioSessionCall(_ name: String, _ call: () throws -> Void) throws {
-        let start = CACurrentMediaTime()
-        defer {
-            let elapsedMs = (CACurrentMediaTime() - start) * 1000
-            let message = "audioSession.\(name) took \(Int(elapsedMs))ms"
-            if elapsedMs >= slowAudioSessionCallMs {
-                InAppLogBridge.shared.warn(tag: "Audio/iOS", message: message)
-            } else {
-                InAppLogBridge.shared.info(tag: "Audio/iOS", message: message)
-            }
-        }
-        try call()
+        audioSessionController.deactivate()
     }
 
     // MARK: - Media Info
@@ -2522,8 +2514,6 @@ final class MPVPlayerViewController: UIViewController {
             handler(shortcut.rawValue)
         }
 
-        // Forward only what we did not consume, so an unrecognised key still reaches the next
-        // responder even when it arrived in the same batch as one we handled.
         if !unhandled.isEmpty {
             super.pressesBegan(unhandled, with: event)
         }

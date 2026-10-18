@@ -130,6 +130,12 @@ import com.nuvio.app.features.livetv.LiveTvRepository
 import com.nuvio.app.features.membership.MemberAccessRepository
 import com.nuvio.app.features.notifications.EpisodeReleaseNotificationsRepository
 import com.nuvio.app.features.p2p.P2pSettingsRepository
+import com.nuvio.app.features.party.PartyEvent
+import com.nuvio.app.features.party.PartyMedia
+import com.nuvio.app.features.party.PartyRepository
+import com.nuvio.app.features.party.PartyScreen
+import com.nuvio.app.features.party.PartySync
+import com.nuvio.app.features.party.partyMediaKey
 import com.nuvio.app.features.player.ExternalPlayerIntentResult
 import com.nuvio.app.features.player.externalPlaybackSession
 import com.nuvio.app.features.player.infusePlaybackCallbacks
@@ -187,12 +193,13 @@ import com.nuvio.app.features.watchprogress.continueWatchingItemKey
 import com.nuvio.app.features.watchprogress.nextUpDismissKey
 import com.nuvio.app.features.watchprogress.toContinueWatchingItem
 import com.nuvio.app.navigation.*
-import dev.chrisbanes.haze.hazeSource
-import dev.chrisbanes.haze.rememberHazeState
+import com.nuvio.app.core.ui.glass.nuvioBackdropSource
+import com.nuvio.app.core.ui.glass.rememberNuvioBackdrop
 import com.nuvio.app.features.servers.ServerMatcher
 import com.nuvio.app.features.servers.ServerRepository
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.getString
@@ -284,7 +291,7 @@ internal fun MainAppContent(
         var showExitConfirmation by rememberSaveable { mutableStateOf(false) }
         var selectedPosterActionTarget by remember { mutableStateOf<PosterActionTarget?>(null) }
         var selectedPosterAnchor by remember { mutableStateOf<PosterZoomAnchor?>(null) }
-        val posterOverlayHazeState = rememberHazeState()
+        val posterOverlayBackdrop = rememberNuvioBackdrop()
         var selectedContinueWatchingForActions by remember { mutableStateOf<ContinueWatchingItem?>(null) }
         var selectedContinueWatchingZoomAnchor by remember { mutableStateOf<PosterZoomAnchor?>(null) }
         val libraryDisintegrationRequests = remember { DisintegrationRequestController<String>() }
@@ -388,6 +395,7 @@ internal fun MainAppContent(
     val collectionsTitle = stringResource(Res.string.collections_header)
     val newCollectionTitle = stringResource(Res.string.collections_new)
     val detailsFallbackTitle = stringResource(Res.string.meta_section_details_title)
+    val watchPartyTitle = stringResource(Res.string.party_title)
     val isRemoteLibrarySource = libraryUiState.sourceMode != LibrarySourceMode.LOCAL
     val appContentGeneration = if (ownsAppRuntime && appGateController != null) {
         val generation by appGateController.contentGeneration.collectAsStateWithLifecycle()
@@ -814,13 +822,14 @@ internal fun MainAppContent(
         if (!ownsAppRuntime) return@LaunchedEffect
         if (!initialHomeReady || profileSwitchLoading) return@LaunchedEffect
         if (resumePromptItem != null) return@LaunchedEffect
+        if (currentRoute is StreamRoute || currentRoute is PlayerRoute || currentRoute is PartyRoute) return@LaunchedEffect
         if (continueWatchingPreferencesUiState.showResumePromptOnLaunch) {
             resumePromptItem = ResumePromptRepository.consumeResumePrompt()
         }
     }
 
     LaunchedEffect(currentRoute) {
-        val inPlaybackFlow = currentRoute is StreamRoute || currentRoute is PlayerRoute
+        val inPlaybackFlow = currentRoute is StreamRoute || currentRoute is PlayerRoute || currentRoute is PartyRoute
         if (inPlaybackFlow) {
             resumePromptItem = null
         }
@@ -881,6 +890,14 @@ internal fun MainAppContent(
                             launchSingleTop = true
                         }
                         InAppLogger.info("App/DeepLink", "downloads consumed")
+                        AppDeepLinkRepository.markConsumed(deepLink)
+                    }
+
+                    is AppDeepLink.Party -> {
+                        appGateController?.appReady?.first { it }
+                        navController.navigate(PartyRoute(code = deepLink.code, title = watchPartyTitle)) {
+                            launchSingleTop = true
+                        }
                         AppDeepLinkRepository.markConsumed(deepLink)
                     }
 
@@ -1109,7 +1126,9 @@ internal fun MainAppContent(
                 }
             }
 
-            if (!PlaybackAvailability.current().canStream(type, videoId)) {
+            val isPartyMedia = PartyRepository.state.value.party?.media?.key ==
+                partyMediaKey(parentMetaType, parentMetaId, seasonNumber, episodeNumber)
+            if (!isPartyMedia && !PlaybackAvailability.current().canStream(type, videoId)) {
                 NuvioToastController.show(playbackUnavailableMessage)
                 return
             }
@@ -1140,6 +1159,32 @@ internal fun MainAppContent(
             )
             navController.navigate(
                 StreamRoute(launchId = streamLaunchId, title = title),
+            )
+        }
+
+        fun openPartyMedia(media: PartyMedia) {
+            if (navController.currentRoute is PlayerRoute) navController.popBackStack()
+            val resumePositionMs = PartyRepository.playback.value
+                ?.takeIf { it.mediaKey == null || it.mediaKey == media.key }
+                ?.let { PartySync.expectedPositionMs(it, PartyRepository.nowMs()) }
+            launchPlaybackWithDownloadPreference(
+                type = media.type,
+                videoId = media.videoId ?: media.metaId,
+                parentMetaId = media.metaId,
+                parentMetaType = media.metaType,
+                title = media.title,
+                logo = media.logo,
+                poster = media.poster,
+                background = media.background,
+                seasonNumber = media.season,
+                episodeNumber = media.episode,
+                episodeTitle = media.episodeTitle,
+                episodeThumbnail = null,
+                pauseDescription = null,
+                resumePositionMs = resumePositionMs,
+                resumeProgressFraction = null,
+                manualSelection = true,
+                startFromBeginning = resumePositionMs == null,
             )
         }
 
@@ -1259,6 +1304,22 @@ internal fun MainAppContent(
                     startFromBeginning = true,
                 )
             }
+        LaunchedEffect(Unit) {
+            if (!ownsAppRuntime) return@LaunchedEffect
+            PartyRepository.events.collect { event ->
+                val message = when (event) {
+                    is PartyEvent.MemberJoined -> getString(Res.string.party_member_joined, event.name)
+                    is PartyEvent.MemberLeft -> getString(Res.string.party_member_left, event.name)
+                    PartyEvent.Removed -> getString(Res.string.party_removed)
+                    PartyEvent.Ended -> getString(Res.string.party_ended)
+                    is PartyEvent.MediaChanged -> getString(Res.string.party_media_changed, event.media.title)
+                    is PartyEvent.ControlChanged -> getString(
+                        if (event.hostOnly) Res.string.party_control_host_only else Res.string.party_control_everyone,
+                    )
+                }
+                NuvioToastController.show(message)
+            }
+        }
 
         val onCatalogClick: (HomeCatalogSection) -> Unit = { section ->
             val launchId = CatalogLaunchStore.put(
@@ -1470,7 +1531,7 @@ internal fun MainAppContent(
         ) {
             val nativeTabBarOwnsChrome = useNativeNavigation && useNativeTabBar
             val settingsRouteBarVisible = currentRoute is SettingsDestinationRoute && !nativeTabBarOwnsChrome
-            val settingsRouteBarHazeState = rememberHazeState()
+            val settingsRouteBarBackdrop = rememberNuvioBackdrop()
             var settingsRouteBarOverlay by remember { mutableStateOf(0.dp) }
             val settingsRouteBottomOverlay = when {
                 currentRoute !is SettingsDestinationRoute -> 0.dp
@@ -1487,7 +1548,7 @@ internal fun MainAppContent(
                     .fillMaxSize()
                     .then(
                         if (selectedPosterActionTarget != null || selectedContinueWatchingZoomAnchor != null) {
-                            Modifier.hazeSource(state = posterOverlayHazeState)
+                            Modifier.nuvioBackdropSource(posterOverlayBackdrop)
                         } else {
                             Modifier
                         },
@@ -1505,7 +1566,7 @@ internal fun MainAppContent(
                     backStack = navBackStack,
                     modifier = Modifier
                         .fillMaxSize()
-                        .then(if (settingsRouteBarVisible) Modifier.hazeSource(state = settingsRouteBarHazeState) else Modifier),
+                        .then(if (settingsRouteBarVisible) Modifier.nuvioBackdropSource(settingsRouteBarBackdrop) else Modifier),
                     onBack = { navController.popBackStack() },
                     entryDecorators = listOf(
                         rememberSaveableStateHolderNavEntryDecorator<NavKey>(),
@@ -1667,6 +1728,7 @@ internal fun MainAppContent(
                                     null
                                 },
                                 onCollectionsSettingsClick = { navController.navigate(CollectionsRoute(collectionsTitle)) },
+                                onWatchPartySettingsClick = { navController.navigate(PartyRoute(title = watchPartyTitle)) },
                                 onFolderClick = { collectionId, folderId ->
                                     val folderTitle = CollectionRepository.collections.value
                                         .firstOrNull { it.id == collectionId }
@@ -1773,6 +1835,7 @@ internal fun MainAppContent(
                         onExternalPlayerLaunch = { launch -> lastExternalPlayerLaunch = launch },
                         launchExternalPlayer = launchExternalPlayer,
                         openExternalStreamUrl = ::openExternalStreamUrl,
+                        onOpenPartyMedia = ::openPartyMedia,
                     )
                     }
                 }
@@ -1850,6 +1913,15 @@ internal fun MainAppContent(
                         }
                     }
                 }
+                entry<PartyRoute> { route ->
+                    SettingsDestination(route, navController) { onBack ->
+                        PartyScreen(
+                            initialCode = route.code,
+                            onBack = onBack,
+                            onWatch = ::openPartyMedia,
+                        )
+                    }
+                }
                 entry<AccountSettingsRoute> { route ->
                     SettingsDestination(route, navController) { onBack ->
                         AccountSettingsScreen(onBack = onBack)
@@ -1921,7 +1993,7 @@ internal fun MainAppContent(
                     SettingsRouteNavigationBar(
                         isTabletLayout = useTabletFloatingTabBar || maxWidth >= 768.dp,
                         showLiveTv = showLiveTvInNavigation,
-                        hazeState = settingsRouteBarHazeState,
+                        backdrop = settingsRouteBarBackdrop,
                         onTabSelected = ::selectTabFromSettingsRoute,
                         onProfileSelected = onNavigationProfileSelected,
                         onAddProfileRequested = onSwitchProfile,
@@ -1945,6 +2017,7 @@ internal fun MainAppContent(
                     onExternalPlayerLaunch = { launch -> lastExternalPlayerLaunch = launch },
                     launchExternalPlayer = launchExternalPlayer,
                     openExternalStreamUrl = ::openExternalStreamUrl,
+                    onOpenPartyMedia = ::openPartyMedia,
                     onBackOverride = {
                         if (navController.currentRoute == route) {
                             navController.popBackStack(expectedRoute = route)
@@ -2109,7 +2182,7 @@ internal fun MainAppContent(
                                 },
                             ),
                         ),
-                        hazeState = posterOverlayHazeState,
+                        backdrop = posterOverlayBackdrop,
                         onDismissed = {
                             selectedPosterActionTarget = null
                             selectedPosterAnchor = null
@@ -2179,7 +2252,7 @@ internal fun MainAppContent(
                                     ),
                                 )
                             },
-                            hazeState = posterOverlayHazeState,
+                            backdrop = posterOverlayBackdrop,
                             onDismissed = {
                                 selectedContinueWatchingForActions = null
                                 selectedContinueWatchingZoomAnchor = null

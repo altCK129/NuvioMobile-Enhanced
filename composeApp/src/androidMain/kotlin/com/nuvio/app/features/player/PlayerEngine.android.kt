@@ -11,6 +11,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.os.Build
 import android.os.SystemClock
+import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.util.AttributeSet
 import androidx.compose.runtime.getValue
@@ -490,28 +491,28 @@ private fun ExoPlayerSurface(
                 "libassRenderType=$libassRenderType mapDV7ToHevc=${playerSettings.mapDV7ToHevc}",
         )
 
+        val playerBuilder = ExoPlayer.Builder(context)
+            .setAudioAttributes(playbackAudioAttributes, true)
+            .setTrackSelector(trackSelector)
+            .setLoadControl(loadControl)
+
         val player = if (useLibass) {
-            ExoPlayer.Builder(context)
-                .setTrackSelector(trackSelector)
-                .setLoadControl(loadControl)
-                .buildWithAssSupportCompat(
-                    context = context,
-                    renderType = libassRenderType.toAssRenderType(),
-                    config = createLibassHandlerConfig(context),
-                    dataSourceFactory = dataSourceFactory,
-                    extractorsFactory = extractorsFactory,
-                    renderersFactory = renderersFactory
-                )
+            playerBuilder.buildWithAssSupportCompat(
+                context = context,
+                renderType = libassRenderType.toAssRenderType(),
+                config = createLibassHandlerConfig(context),
+                dataSourceFactory = dataSourceFactory,
+                extractorsFactory = extractorsFactory,
+                renderersFactory = renderersFactory
+            )
         } else {
             val mediaSourceFactory = DefaultMediaSourceFactory(
                 dataSourceFactory,
                 extractorsFactory,
             )
 
-            ExoPlayer.Builder(context)
+            playerBuilder
                 .setRenderersFactory(renderersFactory)
-                .setTrackSelector(trackSelector)
-                .setLoadControl(loadControl)
                 .setMediaSourceFactory(mediaSourceFactory)
                 .build()
         }
@@ -729,8 +730,6 @@ private fun ExoPlayerSurface(
                                 "ExoPlayer/Android",
                                 "Source error recovered by MIME probe mime=$probedMime url=${InAppLogger.redactUrl(sourceUrl)}",
                             )
-                            // buildUpon keeps the existing subtitle configurations, so the fork no
-                            // longer rebuilds them (and no longer probes each subtitle URL).
                             resolvedMediaItem = resolvedMediaItem.buildUpon()
                                 .setMimeType(probedMime)
                                 .build()
@@ -1010,6 +1009,16 @@ private fun ExoPlayerSurface(
                 override fun setPlaybackSpeed(speed: Float) {
                     InAppLogger.info("ExoPlayer/Android", "control speed=$speed")
                     exoPlayer.setPlaybackSpeed(speed)
+                }
+
+                override fun setVideoZoom(scale: Float) {
+                    val playerView = playerViewRef ?: return
+                    val target = playerView
+                        .findViewById<View>(androidx.media3.ui.R.id.exo_content_frame)
+                        ?: playerView.videoSurfaceView
+                        ?: return
+                    target.scaleX = scale
+                    target.scaleY = scale
                 }
 
                 override fun updateNowPlayingMetadata(info: PlayerNowPlayingInfo) {
@@ -1363,6 +1372,14 @@ private fun LibmpvPlayerSurface(
         onDispose { nowPlayingController?.release() }
     }
 
+    val audioFocus = remember(context) {
+        PlayerAudioFocus(context) { playerViewRef?.setPaused(true) }
+    }
+
+    DisposableEffect(audioFocus) {
+        onDispose { audioFocus.abandon() }
+    }
+
     DisposableEffect(lifecycleOwner, nowPlayingController) {
         val activity = context.findActivity()
         val observer = LifecycleEventObserver { _, event ->
@@ -1412,6 +1429,9 @@ private fun LibmpvPlayerSurface(
                         "mpv_property=eof-reached value=true attempt=${playbackDiagnostics.attempt} " +
                             "elapsedMs=${diagnosticElapsedSince(playbackDiagnostics.prepareStartedAtMs)}",
                     )
+                }
+                if (property == "pause" && !value) {
+                    coroutineScope.launch(Dispatchers.Main.immediate) { audioFocus.request() }
                 }
                 if (property == "eof-reached" || property == "pause" || property == "paused-for-cache" || property == "seeking") {
                     dispatchSnapshot(updateKeepScreenOn = true)
@@ -1981,15 +2001,18 @@ private class NuvioLibmpvView(
         executeMpv {
             when (resizeMode) {
                 PlayerResizeMode.Fit -> {
+                    mpv.setPropertyString("keepaspect", "yes")
                     mpv.setPropertyDouble("panscan", 0.0)
                     mpv.setPropertyString("video-aspect-override", "no")
                 }
                 PlayerResizeMode.Fill -> {
-                    mpv.setPropertyDouble("panscan", 1.0)
+                    mpv.setPropertyString("keepaspect", "no")
+                    mpv.setPropertyDouble("panscan", 0.0)
                     mpv.setPropertyString("video-aspect-override", "no")
                 }
                 PlayerResizeMode.Zoom -> {
-                    mpv.setPropertyDouble("panscan", 0.5)
+                    mpv.setPropertyString("keepaspect", "yes")
+                    mpv.setPropertyDouble("panscan", 1.0)
                     mpv.setPropertyString("video-aspect-override", "no")
                 }
             }
@@ -2045,6 +2068,11 @@ private class NuvioLibmpvView(
                 val target = speed.coerceIn(0.25f, 4f)
                 InAppLogger.info("MPV/Android", "control speed=$target")
                 executeMpv { mpv.setPropertyDouble("speed", target.toDouble()) }
+            }
+
+            override fun setVideoZoom(scale: Float) {
+                val zoom = kotlin.math.ln(scale.coerceIn(0.25f, 4f).toDouble()) / kotlin.math.ln(2.0)
+                executeMpv { mpv.setPropertyDouble("video-zoom", zoom) }
             }
 
             override fun updateNowPlayingMetadata(info: PlayerNowPlayingInfo) {
@@ -3176,7 +3204,6 @@ private class PlayerOutputAudioProcessor(
                     val magnitude = abs(boosted)
                     if (magnitude > peak) peak = magnitude
                 }
-                // Instant attack, smooth release: never exceed the ceiling, recover gradually.
                 if (peak * limiterGain > LIMITER_CEILING) {
                     limiterGain = LIMITER_CEILING / peak
                 } else {

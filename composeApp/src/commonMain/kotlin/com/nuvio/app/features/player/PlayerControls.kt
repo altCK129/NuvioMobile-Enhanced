@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.rounded.ListAlt
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.Flag
+import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Forward10
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.StarBorder
@@ -100,6 +101,7 @@ import org.jetbrains.compose.resources.stringResource
 import kotlin.math.abs
 import kotlin.math.roundToLong
 import com.nuvio.app.core.i18n.localizedEpisodeTitle
+import com.nuvio.app.core.ui.glass.ambientLiquidGlass
 
 @Composable
 internal fun PlayerControlsShell(
@@ -124,6 +126,8 @@ internal fun PlayerControlsShell(
     showPlaybackControls: Boolean = true,
     onLockToggle: () -> Unit,
     onBack: () -> Unit,
+    onPartyClick: (() -> Unit)? = null,
+    partyActive: Boolean = false,
     onTogglePlayback: () -> Unit,
     onSeekBack: () -> Unit,
     onSeekForward: () -> Unit,
@@ -138,6 +142,8 @@ internal fun PlayerControlsShell(
     onCastClick: (() -> Unit)? = null,
     isCasting: Boolean = false,
     onPictureInPictureClick: (() -> Unit)? = null,
+    onOrientationToggleClick: (() -> Unit)? = null,
+    isPortraitPlayback: Boolean = false,
     onInfoClick: (() -> Unit)? = null,
     onRateClick: (() -> Unit)? = null,
     userRating: Int? = null,
@@ -224,10 +230,14 @@ internal fun PlayerControlsShell(
                     onCastClick = onCastClick,
                     isCasting = isCasting,
                     onPictureInPictureClick = onPictureInPictureClick,
+                    onOrientationToggleClick = onOrientationToggleClick,
+                    isPortraitPlayback = isPortraitPlayback,
                     onInfoClick = onInfoClick,
                     onRateClick = onRateClick,
                     userRating = userRating,
                     onOpenInExternalPlayer = onOpenInExternalPlayer,
+                    onPartyClick = onPartyClick,
+                    partyActive = partyActive,
                     onBack = onBack,
                     modifier = Modifier
                         .align(Alignment.TopStart)
@@ -247,6 +257,10 @@ internal fun PlayerControlsShell(
                         onBack = onBack,
                         onCastClick = onCastClick,
                         isCasting = isCasting,
+                        onPartyClick = onPartyClick,
+                        partyActive = partyActive,
+                        onOrientationToggleClick = onOrientationToggleClick,
+                        isPortraitPlayback = isPortraitPlayback,
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .windowInsetsPadding(WindowInsets.safeContent.only(WindowInsetsSides.Top))
@@ -419,10 +433,14 @@ private fun PlayerHeader(
     onCastClick: (() -> Unit)?,
     isCasting: Boolean,
     onPictureInPictureClick: (() -> Unit)?,
+    onOrientationToggleClick: (() -> Unit)? = null,
+    isPortraitPlayback: Boolean = false,
     onInfoClick: (() -> Unit)?,
     onRateClick: (() -> Unit)? = null,
     userRating: Int? = null,
     onOpenInExternalPlayer: (() -> Unit)?,
+    onPartyClick: (() -> Unit)?,
+    partyActive: Boolean,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -532,6 +550,16 @@ private fun PlayerHeader(
                             onClick = onOpenInExternalPlayer,
                         )
                     }
+                    if (onPartyClick != null) {
+                        PlayerHeaderIconButton(
+                            icon = Icons.Rounded.Groups,
+                            contentDescription = stringResource(Res.string.party_title),
+                            buttonSize = metrics.headerIconSize + 16.dp,
+                            iconSize = metrics.headerIconSize,
+                            onClick = onPartyClick,
+                            tint = if (partyActive) MaterialTheme.colorScheme.primary else Color.White,
+                        )
+                    }
                     PlayerHeaderIconButton(
                         icon = if (isLocked) Icons.Rounded.LockOpen else Icons.Rounded.Lock,
                         contentDescription = if (isLocked) {
@@ -568,6 +596,15 @@ private fun PlayerHeader(
                             buttonSize = metrics.headerIconSize + 16.dp,
                             iconSize = metrics.headerIconSize,
                             onClick = onPictureInPictureClick,
+                        )
+                    }
+                    if (onOrientationToggleClick != null) {
+                        PlayerHeaderIconButton(
+                            icon = playerOrientationToggleIcon(isPortraitPlayback),
+                            contentDescription = stringResource(playerOrientationToggleLabel(isPortraitPlayback)),
+                            buttonSize = metrics.headerIconSize + 16.dp,
+                            iconSize = metrics.headerIconSize,
+                            onClick = onOrientationToggleClick,
                         )
                     }
                     if (onRateClick != null) {
@@ -612,19 +649,27 @@ internal fun PlayerHeaderIconButton(
     buttonSize: androidx.compose.ui.unit.Dp,
     iconSize: androidx.compose.ui.unit.Dp,
     onClick: () -> Unit,
+    tint: Color = Color.White,
 ) {
     Box(
         modifier = Modifier
             .size(buttonSize)
             .clip(CircleShape)
-            .background(Color.Black.copy(alpha = 0.35f))
+            .ambientLiquidGlass(
+                shape = CircleShape,
+                tint = Color.Black.copy(alpha = 0.35f),
+                fallback = Color.Black.copy(alpha = 0.35f),
+                blurRadius = 12.dp,
+                refractionHeight = 6.dp,
+                refractionAmount = 8.dp,
+            )
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = Color.White,
+            tint = tint,
             modifier = Modifier.size(iconSize),
         )
     }
@@ -675,6 +720,14 @@ private fun SideControlButton(
     Box(
         modifier = Modifier
             .clip(CircleShape)
+            .ambientLiquidGlass(
+                shape = CircleShape,
+                tint = Color.Black.copy(alpha = 0.18f),
+                fallback = Color.Transparent,
+                blurRadius = 14.dp,
+                refractionHeight = 8.dp,
+                refractionAmount = 12.dp,
+            )
             .clickable(onClick = onClick)
             .padding(metrics.sideButtonPadding),
         contentAlignment = Alignment.Center,
@@ -702,6 +755,14 @@ internal fun PlayPauseControlButton(
     Box(
         modifier = Modifier
             .clip(CircleShape)
+            .ambientLiquidGlass(
+                shape = CircleShape,
+                tint = Color.Black.copy(alpha = 0.18f),
+                fallback = Color.Transparent,
+                blurRadius = 16.dp,
+                refractionHeight = 10.dp,
+                refractionAmount = 14.dp,
+            )
             .clickable(onClick = onClick)
             .padding(metrics.playButtonPadding),
         contentAlignment = Alignment.Center,
@@ -778,13 +839,22 @@ private fun ProgressControls(
             horizontalArrangement = Arrangement.Center,
         ) {
             Surface(
-                color = Color.Black.copy(alpha = 0.5f),
+                color = Color.Transparent,
                 shape = RoundedCornerShape(24.dp),
-                modifier = Modifier.border(
-                    width = 1.dp,
-                    color = Color.White.copy(alpha = 0.2f),
-                    shape = RoundedCornerShape(24.dp),
-                ),
+                modifier = Modifier
+                    .ambientLiquidGlass(
+                        shape = RoundedCornerShape(24.dp),
+                        tint = Color.Black.copy(alpha = 0.4f),
+                        fallback = Color.Black.copy(alpha = 0.5f),
+                        blurRadius = 16.dp,
+                        refractionHeight = 10.dp,
+                        refractionAmount = 14.dp,
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = Color.White.copy(alpha = 0.2f),
+                        shape = RoundedCornerShape(24.dp),
+                    ),
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
@@ -1110,7 +1180,14 @@ internal fun LockedPlayerOverlay(
                 modifier = Modifier
                     .size(78.dp)
                     .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = 0.52f))
+                    .ambientLiquidGlass(
+                        shape = CircleShape,
+                        tint = Color.Black.copy(alpha = 0.4f),
+                        fallback = Color.Black.copy(alpha = 0.52f),
+                        blurRadius = 16.dp,
+                        refractionHeight = 10.dp,
+                        refractionAmount = 14.dp,
+                    )
                     .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
                     .clickable(onClick = onUnlock),
                 contentAlignment = Alignment.Center,
@@ -1215,7 +1292,14 @@ private fun TimePill(
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(12.dp))
-            .background(Color.Black.copy(alpha = 0.5f))
+            .ambientLiquidGlass(
+                shape = RoundedCornerShape(12.dp),
+                tint = Color.Black.copy(alpha = 0.4f),
+                fallback = Color.Black.copy(alpha = 0.5f),
+                blurRadius = 12.dp,
+                refractionHeight = 4.dp,
+                refractionAmount = 6.dp,
+            )
             .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(12.dp))
             .padding(horizontal = 10.dp, vertical = 4.dp),
     ) {

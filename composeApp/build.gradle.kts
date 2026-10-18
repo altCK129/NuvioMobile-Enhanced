@@ -509,7 +509,7 @@ kotlin {
             implementation("io.coil-kt.coil3:coil-svg:${libs.versions.coil.get()}") {
                 exclude(group = "org.jetbrains.skiko", module = "skiko")
             }
-            implementation("dev.chrisbanes.haze:haze:1.7.2")
+            implementation("io.github.kyant0:backdrop:2.0.1")
             implementation(libs.compose.runtime)
             implementation(libs.compose.foundation)
             implementation(libs.compose.material3)
@@ -533,6 +533,7 @@ kotlin {
             implementation(libs.supabase.auth)
             implementation(libs.supabase.functions)
             implementation(libs.supabase.storage)
+            implementation(libs.supabase.realtime)
             implementation(libs.reorderable)
         }
         commonTest.dependencies {
